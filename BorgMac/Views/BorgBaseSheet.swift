@@ -14,6 +14,8 @@ struct BorgBaseSheet: View {
     @State private var section: Section = .repos
     @State private var pendingDeleteRepo: BorgBaseRepo?
     @State private var pendingDeleteKey: BorgBaseSSHKey?
+    @State private var pendingRenameRepo: BorgBaseRepo?
+    @State private var renameDraft: String = ""
 
     enum Section: String, CaseIterable, Identifiable {
         case repos = "Repositories"
@@ -67,6 +69,24 @@ struct BorgBaseSheet: View {
             Button("Cancel", role: .cancel) { pendingDeleteRepo = nil }
         } message: {
             Text("This deletes the repository and all its archives on BorgBase. It cannot be undone.")
+        }
+        .alert(
+            "Rename \(pendingRenameRepo?.name ?? "")",
+            isPresented: Binding(
+                get: { pendingRenameRepo != nil },
+                set: { if !$0 { pendingRenameRepo = nil } }
+            )
+        ) {
+            TextField("New name", text: $renameDraft)
+            Button("Rename") {
+                if let repo = pendingRenameRepo {
+                    renameRepo(repo, to: renameDraft)
+                }
+                pendingRenameRepo = nil
+            }
+            Button("Cancel", role: .cancel) { pendingRenameRepo = nil }
+        } message: {
+            Text("This only changes the display name on BorgBase. The SSH path stays the same.")
         }
         .confirmationDialog(
             "Delete key \(pendingDeleteKey?.name ?? "")?",
@@ -328,6 +348,15 @@ struct BorgBaseSheet: View {
             .help(repoAlreadyImported(repo)
                   ? "This repository is already added locally."
                   : "Prefill a new local repository with this URL.")
+            Button {
+                renameDraft = repo.name
+                pendingRenameRepo = repo
+            } label: {
+                Image(systemName: "pencil")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("Rename repo on BorgBase")
             Button(role: .destructive) {
                 pendingDeleteRepo = repo
             } label: {
@@ -461,6 +490,19 @@ struct BorgBaseSheet: View {
             }
         } catch {
             self.error = error.localizedDescription
+        }
+    }
+
+    private func renameRepo(_ repo: BorgBaseRepo, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != repo.name else { return }
+        Task {
+            do {
+                try await BorgBaseClient.shared.renameRepo(id: repo.id, newName: trimmed)
+                await reload()
+            } catch {
+                self.error = error.localizedDescription
+            }
         }
     }
 

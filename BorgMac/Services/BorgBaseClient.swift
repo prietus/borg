@@ -249,6 +249,28 @@ actor BorgBaseClient {
         return try await send(query: query, variables: vars, decoding: Wrap.self).repoAdd.repoAdded
     }
 
+    /// Renames a repository. `repoEdit` accepts many optional fields; we
+    /// only send `id` and `name` so every other setting (quota, region,
+    /// keys…) is left untouched server-side.
+    func renameRepo(id: String, newName: String) async throws {
+        let query = """
+        mutation repoEdit($id: String!, $name: String!) {
+          repoEdit(id: $id, name: $name) {
+            __typename
+          }
+        }
+        """
+        struct Wrap: Decodable {
+            struct Inner: Decodable {}
+            let repoEdit: Inner
+        }
+        _ = try await send(
+            query: query,
+            variables: ["id": id, "name": newName],
+            decoding: Wrap.self
+        )
+    }
+
     /// Deletes a repository permanently. BorgBase requires the account to be
     /// in good standing and the caller token to have write scope. There is no
     /// undo — the repo's data is erased server-side.
