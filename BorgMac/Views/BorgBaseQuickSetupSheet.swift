@@ -7,10 +7,22 @@ struct BorgBaseQuickSetupSheet: View {
     @State private var repoName: String = ""
     @State private var passphrase: String = ""
     @State private var passphraseConfirm: String = ""
+    @State private var region: Region = .eu
     @State private var token: String = ""
     @State private var hasStoredToken: Bool = false
     @State private var step: Step = .idle
     @State private var error: String?
+
+    enum Region: String, CaseIterable, Identifiable {
+        case eu, us
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .eu: return "Europe (Frankfurt / Helsinki)"
+            case .us: return "United States"
+            }
+        }
+    }
 
     enum Step: Equatable {
         case idle
@@ -124,6 +136,11 @@ struct BorgBaseQuickSetupSheet: View {
                 SecureField("Passphrase", text: $passphrase)
                 SecureField("Repeat passphrase", text: $passphraseConfirm)
             }
+            Section("Region") {
+                Picker("Data center", selection: $region) {
+                    ForEach(Region.allCases) { Text($0.label).tag($0) }
+                }
+            }
         }
         .formStyle(.grouped)
     }
@@ -214,7 +231,8 @@ struct BorgBaseQuickSetupSheet: View {
             step = .creatingRepo
             let createdRepo = try await BorgBaseClient.shared.createRepo(
                 name: cleanName,
-                fullAccessKeys: [added.id]
+                fullAccessKeys: [added.id],
+                region: region.rawValue
             )
 
             // 4. borg init

@@ -17,10 +17,39 @@ struct BorgQuickSetupSheet: View {
     @State private var name: String = ""
     @State private var passphrase: String = ""
     @State private var passphraseConfirm: String = ""
+    @State private var encryption: Encryption = .repokeyBlake2
     @State private var step: Step = .idle
     @State private var error: String?
     @State private var availableKeys: [LocalSSHKey] = []
     @State private var selectedKeyPath: String? = nil  // nil = ssh-agent default
+
+    enum Encryption: String, CaseIterable, Identifiable {
+        case repokeyBlake2  = "repokey-blake2"
+        case repokey        = "repokey"
+        case keyfileBlake2  = "keyfile-blake2"
+        case none           = "none"
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .repokeyBlake2: return "Encrypted — key stored in repo (recommended)"
+            case .repokey:       return "Encrypted — key in repo, HMAC-SHA256"
+            case .keyfileBlake2: return "Encrypted — key on this Mac only (advanced)"
+            case .none:          return "No encryption"
+            }
+        }
+
+        var helpText: String? {
+            switch self {
+            case .repokeyBlake2, .repokey:
+                return nil
+            case .keyfileBlake2:
+                return "The encryption key lives in ~/.config/borg/keys/ on this Mac. If you lose it the repo is unrecoverable — back it up separately."
+            case .none:
+                return "Anyone with access to the repo can read your data. Only choose this for throwaway test repos."
+            }
+        }
+    }
 
     enum Step: Equatable {
         case idle
@@ -136,6 +165,19 @@ struct BorgQuickSetupSheet: View {
                     .disabled(step.isRunning)
             }
 
+            Section("Encryption") {
+                Picker("Mode", selection: $encryption) {
+                    ForEach(Encryption.allCases) { Text($0.label).tag($0) }
+                }
+                .disabled(step.isRunning)
+                if let help = encryption.helpText {
+                    Text(help)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             if mode == .ssh {
                 Section("SSH key") {
                     Picker("Key to use", selection: $selectedKeyPath) {
@@ -241,6 +283,7 @@ struct BorgQuickSetupSheet: View {
             try await BorgClient.shared.initRepo(
                 url: location,
                 passphrase: passphrase,
+                encryption: encryption.rawValue,
                 sshKeyPath: keyPath
             )
 
