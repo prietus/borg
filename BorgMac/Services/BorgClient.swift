@@ -344,6 +344,19 @@ actor BorgClient {
         _ = try await run(["umount", mountpoint.path], passphrase: nil)
     }
 
+    /// Forcibly releases a stuck repository lock (`borg break-lock <repo>`).
+    /// Only safe to call when the user is certain no other process is
+    /// writing to the repo — otherwise you can corrupt an in-flight
+    /// backup. Exposed in the UI behind a confirmation dialog.
+    func breakLock(repo: Repository) async throws {
+        let pass = try await passphrase(for: repo)
+        _ = try await run(
+            ["break-lock", repo.url],
+            passphrase: pass,
+            sshKeyPath: repo.sshKeyPath
+        )
+    }
+
     /// Deletes a single archive from a repo (`borg delete <repo>::<archive>`).
     /// Disk space isn't reclaimed until the next `compact` run — the
     /// caller UI is expected to surface that caveat to the user.

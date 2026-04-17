@@ -56,9 +56,9 @@ struct BorgBaseEditRepoSheet: View {
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .none:       return "No access"
+            case .none:       return "None"
             case .full:       return "Full"
-            case .appendOnly: return "Append-only"
+            case .appendOnly: return "Append"
             case .rsync:      return "Rsync"
             }
         }
@@ -153,12 +153,13 @@ struct BorgBaseEditRepoSheet: View {
                                     }
                                 }
                                 .labelsHidden()
-                                .frame(maxWidth: 160)
+                                .pickerStyle(.segmented)
+                                .frame(width: 260)
                             }
                             .disabled(saving)
                         }
 
-                        Text("Full: read & write. Append-only: backups yes, delete/modify no. Rsync: legacy rsync-only access.")
+                        Text("Full: read & write. Append: backups yes, delete/modify no. Rsync: legacy rsync-only access.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

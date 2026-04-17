@@ -5,6 +5,29 @@ options:
     macOS: "14.0"
   createIntermediateGroups: true
   defaultConfig: Debug
+schemes:
+  BorgMac:
+    build:
+      targets:
+        BorgMac: all
+        BorgMacWidget: [test, run]
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+  BorgMacWidget:
+    build:
+      targets:
+        BorgMacWidget: all
+    run:
+      config: Debug
+
 targets:
   BorgMac:
     type: application

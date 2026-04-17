@@ -19,6 +19,8 @@ struct RepositoryDetailView: View {
     @State private var treemapArchive: Archive?
     @State private var pendingDelete: Archive?
     @State private var deleting = false
+    @State private var showingBreakLockConfirm = false
+    @State private var breakingLock = false
 
     /// Live snapshot of whichever schedule of this repo is currently
     /// running. `nil` when no scheduled backup is in flight. Drives the
@@ -79,6 +81,15 @@ struct RepositoryDetailView: View {
                 }
                 .help("Re-save the repo passphrase in the Keychain (needed by scheduled backups)")
                 .disabled(isBusy)
+                Menu {
+                    Button("Break lock…", role: .destructive) {
+                        showingBreakLockConfirm = true
+                    }
+                    .disabled(isBusy || breakingLock)
+                } label: {
+                    Label("More", systemImage: "ellipsis.circle")
+                }
+                .help("Recovery actions")
                 Button {
                     Task { await refresh() }
                 } label: {
@@ -164,6 +175,18 @@ struct RepositoryDetailView: View {
             Button("Keep running", role: .cancel) { pendingCancelSchedule = nil }
         } message: {
             Text("Sends SIGTERM to borg. It writes a checkpoint and exits cleanly, so the repo stays consistent. The partial archive is discarded but the chunks already uploaded stay in the cache — the next run will reuse them.")
+        }
+        .confirmationDialog(
+            "Break the repository lock?",
+            isPresented: $showingBreakLockConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Break lock", role: .destructive) {
+                Task { await breakLock() }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Runs `borg break-lock` to release a stuck lock file — typically left behind when a previous operation was killed mid-run. Only do this if you're sure no other process (another Mac, a cron job, a running backup) is currently writing to this repo. Breaking the lock while someone else is writing can corrupt the repository.")
         }
     }
 
@@ -330,6 +353,20 @@ struct RepositoryDetailView: View {
             } catch {
                 self.error = error.localizedDescription
             }
+        }
+    }
+
+    private func breakLock() async {
+        breakingLock = true
+        defer { breakingLock = false }
+        do {
+            try await BorgClient.shared.breakLock(repo: repository)
+            // Pull the archive list right after so the user can see
+            // whether the repo is back to normal or there's something
+            // more going on (e.g. network issues, corruption).
+            await refresh()
+        } catch {
+            self.error = error.localizedDescription
         }
     }
 
