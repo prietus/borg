@@ -121,7 +121,11 @@ echo "==> Building marketing site with version ${VERSION}..."
 # Astro reads PUBLIC_APP_VERSION at build time via import.meta.env.
 # No file mutations — just an env var, so the source stays clean across
 # releases and the single source of truth is $VERSION.
-(cd "$SITE_DIR" && PUBLIC_APP_VERSION="$VERSION" npm run build)
+# node@18 is keg-only in homebrew (not linked into /opt/homebrew/bin),
+# so prepend its bin dir here. Otherwise the script exits with
+# "npm: command not found" mid-release.
+NODE_BIN="/opt/homebrew/opt/node@18/bin"
+(cd "$SITE_DIR" && PATH="$NODE_BIN:$PATH" PUBLIC_APP_VERSION="$VERSION" npm run build)
 
 echo "==> Uploading zip ${ZIP_OUT} to ${PUBLISH_HOST}:${PUBLISH_PATH}/..."
 scp "$ZIP_OUT" "${PUBLISH_HOST}:${PUBLISH_PATH}/"
