@@ -4,16 +4,23 @@ set -euo pipefail
 # BorgMac Release Script
 # Usage: ./release.sh 0.1.0
 #        NOTARIZE=0 ./release.sh 0.1.0   # skip notarization (faster, dev only)
+#        PUBLISH=0  ./release.sh 0.1.0   # notarize but don't upload to the site
 #
-# Builds, signs, and notarizes a Release .app with Developer ID.
-# Pending for later: DMG, brew cask, site web, git tag.
+# Builds, signs, and notarizes a Release .app with Developer ID, then
+# publishes the zip + marketing site to borgmac.priet.us.
+# Pending for later: DMG, brew cask, git tag.
 
 VERSION="${1:?Usage: ./release.sh VERSION}"
 NOTARIZE="${NOTARIZE:-1}"
+PUBLISH="${PUBLISH:-1}"
 
 TEAM_ID="LFTD9T269J"
 SIGN_ID="Developer ID Application: carlos prieto ortiz ($TEAM_ID)"
 KEYCHAIN_PROFILE="notarytool-profile"
+
+SITE_DIR="/Users/carlos/borgmac-site"
+PUBLISH_HOST="teraflops@192.168.1.37"
+PUBLISH_PATH="/home/teraflops/borgmac/site"
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DERIVED="/tmp/BorgMac-build"
@@ -102,12 +109,39 @@ ditto -c -k --keepParent "$APP_OUT" "$ZIP_OUT"
 echo "==> Final Gatekeeper assessment (should now pass):"
 spctl --assess --type exec --verbose=4 "$APP_OUT"
 
+if [ "$PUBLISH" != "1" ]; then
+    echo
+    echo "==> Publish skipped (PUBLISH=$PUBLISH)."
+    echo "    App: $APP_OUT"
+    echo "    Zip: $ZIP_OUT"
+    exit 0
+fi
+
+echo "==> Building marketing site with version ${VERSION}..."
+# Astro reads PUBLIC_APP_VERSION at build time via import.meta.env.
+# No file mutations — just an env var, so the source stays clean across
+# releases and the single source of truth is $VERSION.
+(cd "$SITE_DIR" && PUBLIC_APP_VERSION="$VERSION" npm run build)
+
+echo "==> Uploading zip ${ZIP_OUT} to ${PUBLISH_HOST}:${PUBLISH_PATH}/..."
+scp "$ZIP_OUT" "${PUBLISH_HOST}:${PUBLISH_PATH}/"
+
+echo "==> Syncing site ${SITE_DIR}/dist/ to ${PUBLISH_HOST}:${PUBLISH_PATH}/..."
+# --delete cleans up stale hashed assets from previous builds. The
+# --exclude keeps every versioned zip intact, so old download links
+# keep resolving even after we ship a new build.
+rsync -av --delete \
+    --exclude 'BorgMac-*.zip' \
+    "$SITE_DIR/dist/" \
+    "${PUBLISH_HOST}:${PUBLISH_PATH}/"
+
 echo
 echo "==> Done."
 echo "    App:     $APP_OUT"
 echo "    Zip:     $ZIP_OUT"
 echo "    Version: $VERSION"
 echo "    Signed:  $SIGN_ID"
-echo "    Status:  notarized + stapled"
+echo "    Status:  notarized + stapled + published"
+echo "    Site:    https://borgmac.priet.us/"
 echo
 echo "    Open with: open \"$APP_OUT\""
