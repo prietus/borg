@@ -68,6 +68,7 @@ struct BorgMacApp: App {
                 .environmentObject(store)
                 .environmentObject(statusStore)
                 .environmentObject(manualBackupStore)
+                .environmentObject(license)
         }
         .menuBarExtraStyle(.window)
     }

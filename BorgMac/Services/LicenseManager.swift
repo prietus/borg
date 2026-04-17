@@ -14,7 +14,7 @@ enum LicenseConfig {
 
     /// LemonSqueezy checkout URL for the paid product.
     /// Replace with the real one after creating the product in LS.
-    static let checkoutURL = URL(string: "https://prietus.lemonsqueezy.com/buy/REPLACE-ME")!
+    static let checkoutURL = URL(string: "https://prietus.lemonsqueezy.com/checkout/buy/8a6f1fe6-afb6-4a73-b275-a0631c747394")!
 
     /// How often an already-activated license re-validates against LS.
     /// Offline tolerance is `max(validateEvery, offlineGrace)` — see
@@ -36,12 +36,21 @@ enum LicenseStatus: Equatable {
         return false
     }
 
+    /// Whether the UI should allow actions that add something new (repos,
+    /// schedules, BorgBox servers). Existing schedules, manual backups,
+    /// maintenance and restores keep working regardless so the user never
+    /// loses access to their data.
+    var canCreateNew: Bool {
+        if case .expired = self { return false }
+        return true
+    }
+
     var bannerText: String? {
         switch self {
         case .trial(let days):
             return days <= 3 ? "Trial ends in \(days) day\(days == 1 ? "" : "s")." : nil
         case .expired:
-            return "Your trial has expired. Buy a license to keep using BorgMac."
+            return "Trial expired. Buy a license to keep adding new repositories and schedules."
         case .licensed, .unknown:
             return nil
         }
@@ -171,6 +180,25 @@ final class LicenseManager: ObservableObject {
             applyOfflineGrace(stored: stored)
         }
     }
+
+    #if DEBUG
+    /// DEBUG-only: force the app into an `.expired` trial state to exercise the
+    /// soft-gate UI without waiting 14 days. Wipes any cached license and
+    /// rewrites the trial start to 15 days ago.
+    func debugForceExpired() {
+        Keychain.deleteLicense()
+        Keychain.setTrialStart(Date().addingTimeInterval(-Double((LicenseConfig.trialDays + 1) * 86400)))
+        recomputeLocalStatus()
+    }
+
+    /// DEBUG-only: restart the trial clock from today. Also wipes any cached
+    /// license so the user can re-activate cleanly.
+    func debugResetTrial() {
+        Keychain.deleteLicense()
+        Keychain.setTrialStart(Date())
+        recomputeLocalStatus()
+    }
+    #endif
 
     /// Opens LemonSqueezy checkout in the user's default browser.
     func openCheckout() {

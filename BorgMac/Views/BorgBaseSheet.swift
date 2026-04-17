@@ -3,6 +3,7 @@ import SwiftUI
 struct BorgBaseSheet: View {
     var onImport: (_ name: String, _ url: String) -> Void
 
+    @EnvironmentObject var license: LicenseManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var tokenInput: String = ""
@@ -14,8 +15,20 @@ struct BorgBaseSheet: View {
     @State private var section: Section = .repos
     @State private var pendingDeleteRepo: BorgBaseRepo?
     @State private var pendingDeleteKey: BorgBaseSSHKey?
-    @State private var pendingRenameRepo: BorgBaseRepo?
-    @State private var renameDraft: String = ""
+    @State private var editingRepo: BorgBaseRepo?
+    @State private var pendingCompactRepo: BorgBaseRepo?
+    @State private var infoBanner: String?
+
+    /// Tracks repos that have a server-side compaction in flight. BorgBase
+    /// exposes no progress stream, so we keep this in-memory (per-session)
+    /// and clear entries either when `currentUsage` drops below the value at
+    /// trigger time, or after a 60-minute safety timeout.
+    @State private var compactingSince: [String: CompactEntry] = [:]
+
+    private struct CompactEntry {
+        let triggeredAt: Date
+        let usageAtTriggerMB: Double
+    }
 
     enum Section: String, CaseIterable, Identifiable {
         case repos = "Repositories"
@@ -70,23 +83,10 @@ struct BorgBaseSheet: View {
         } message: {
             Text("This deletes the repository and all its archives on BorgBase. It cannot be undone.")
         }
-        .alert(
-            "Rename \(pendingRenameRepo?.name ?? "")",
-            isPresented: Binding(
-                get: { pendingRenameRepo != nil },
-                set: { if !$0 { pendingRenameRepo = nil } }
-            )
-        ) {
-            TextField("New name", text: $renameDraft)
-            Button("Rename") {
-                if let repo = pendingRenameRepo {
-                    renameRepo(repo, to: renameDraft)
-                }
-                pendingRenameRepo = nil
+        .sheet(item: $editingRepo) { repo in
+            BorgBaseEditRepoSheet(repo: repo, accountKeys: sshKeys) {
+                Task { await reload() }
             }
-            Button("Cancel", role: .cancel) { pendingRenameRepo = nil }
-        } message: {
-            Text("This only changes the display name on BorgBase. The SSH path stays the same.")
         }
         .confirmationDialog(
             "Delete key \(pendingDeleteKey?.name ?? "")?",
@@ -106,6 +106,33 @@ struct BorgBaseSheet: View {
         } message: {
             Text("Repos whose only access was this key will no longer be reachable.")
         }
+        .confirmationDialog(
+            "Compact \(pendingCompactRepo?.name ?? "")?",
+            isPresented: Binding(
+                get: { pendingCompactRepo != nil },
+                set: { if !$0 { pendingCompactRepo = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Compact now") {
+                if let repo = pendingCompactRepo {
+                    compactRepo(repo)
+                }
+                pendingCompactRepo = nil
+            }
+            Button("Cancel", role: .cancel) { pendingCompactRepo = nil }
+        } message: {
+            Text("Runs `borg compact` on BorgBase's side to reclaim space freed by pruned archives. The repo stays usable but writes may be slower while it runs.")
+        }
+        .alert(
+            "BorgBase",
+            isPresented: Binding(
+                get: { infoBanner != nil },
+                set: { if !$0 { infoBanner = nil } }
+            ),
+            actions: { Button("OK") { infoBanner = nil } },
+            message: { Text(infoBanner ?? "") }
+        )
     }
 
     // MARK: - Header
@@ -237,7 +264,7 @@ struct BorgBaseSheet: View {
             )
             aggregateItem(
                 icon: "chart.bar.fill",
-                value: String(format: "%.1f GB", totalUsed),
+                value: formatMB(totalUsed),
                 label: "used"
             )
             if nearQuota > 0 {
@@ -279,6 +306,18 @@ struct BorgBaseSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    /// Formats a MB value (as returned by BorgBase's GraphQL) as a human-
+    /// readable string. Uses decimal units (1000-based) to match how BorgBase
+    /// itself reports sizes on its web dashboard.
+    private func formatMB(_ mb: Double) -> String {
+        let bytes = Int64(mb * 1_000_000)
+        let fmt = ByteCountFormatter()
+        fmt.countStyle = .decimal
+        fmt.allowedUnits = [.useKB, .useMB, .useGB, .useTB]
+        fmt.includesUnit = true
+        return fmt.string(fromByteCount: bytes)
     }
 
     /// Formats the repo's `lastModified` as a relative string ("2 days ago",
@@ -344,37 +383,49 @@ struct BorgBaseSheet: View {
                 Label("Import", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(.bordered)
-            .disabled(repo.repoPath?.isEmpty ?? true || repoAlreadyImported(repo))
-            .help(repoAlreadyImported(repo)
-                  ? "This repository is already added locally."
-                  : "Prefill a new local repository with this URL.")
-            Button {
-                renameDraft = repo.name
-                pendingRenameRepo = repo
-            } label: {
-                Image(systemName: "pencil")
+            .disabled(repo.repoPath?.isEmpty ?? true || repoAlreadyImported(repo) || !license.status.canCreateNew)
+            .help(importHelp(for: repo))
+            if let entry = compactingSince[repo.id] {
+                compactingPill(since: entry.triggeredAt)
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help("Rename repo on BorgBase")
-            Button(role: .destructive) {
-                pendingDeleteRepo = repo
+            Menu {
+                Button {
+                    editingRepo = repo
+                } label: {
+                    Label("Edit…", systemImage: "slider.horizontal.3")
+                }
+                Button {
+                    pendingCompactRepo = repo
+                } label: {
+                    Label("Compact on BorgBase…", systemImage: "archivebox")
+                }
+                .disabled(compactingSince[repo.id] != nil)
+                Divider()
+                Button(role: .destructive) {
+                    pendingDeleteRepo = repo
+                } label: {
+                    Label("Delete repo…", systemImage: "trash")
+                }
             } label: {
-                Image(systemName: "trash")
+                Image(systemName: "ellipsis.circle")
             }
-            .buttonStyle(.borderless)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             .foregroundStyle(.secondary)
-            .help("Delete repo from BorgBase")
+            .help("More actions")
         }
     }
 
     private func quotaBar(_ repo: BorgBaseRepo) -> some View {
-        let used = repo.currentUsage ?? 0
-        let quotaGB = repo.quota ?? 0
-        let hasQuota = repo.quotaEnabled == true && quotaGB > 0
-        let usedText = String(format: "%.2f GB", used)
-        let totalText = hasQuota ? String(format: "%.0f GB", quotaGB) : "∞"
-        let ratio: Double = hasQuota ? min(used / quotaGB, 1.0) : 0.0
+        // BorgBase's `currentUsage` and `quota` are reported in **megabytes**
+        // (decimal MB, float). The web dashboard does the unit conversion for
+        // display; raw API values look GB-sized but are ~1000× smaller.
+        let usedMB = repo.currentUsage ?? 0
+        let quotaMB = repo.quota ?? 0
+        let hasQuota = repo.quotaEnabled == true && quotaMB > 0
+        let usedText = formatMB(usedMB)
+        let totalText = hasQuota ? formatMB(quotaMB) : "∞"
+        let ratio: Double = hasQuota ? min(usedMB / quotaMB, 1.0) : 0.0
         let tint: Color = ratio > 0.9 ? .red : (ratio > 0.75 ? .orange : .accentColor)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
@@ -478,6 +529,16 @@ struct BorgBaseSheet: View {
         return store.repositories.contains { $0.url == path }
     }
 
+    private func importHelp(for repo: BorgBaseRepo) -> String {
+        if repoAlreadyImported(repo) {
+            return "This repository is already added locally."
+        }
+        if !license.status.canCreateNew {
+            return "Trial expired — buy a license to import new repositories."
+        }
+        return "Prefill a new local repository with this URL."
+    }
+
     private func saveToken() {
         let trimmed = tokenInput.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
@@ -493,16 +554,62 @@ struct BorgBaseSheet: View {
         }
     }
 
-    private func renameRepo(_ repo: BorgBaseRepo, to newName: String) {
-        let trimmed = newName.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty, trimmed != repo.name else { return }
+    private func compactRepo(_ repo: BorgBaseRepo) {
         Task {
             do {
-                try await BorgBaseClient.shared.renameRepo(id: repo.id, newName: trimmed)
-                await reload()
+                try await BorgBaseClient.shared.compactRepo(id: repo.id)
+                compactingSince[repo.id] = CompactEntry(
+                    triggeredAt: Date(),
+                    usageAtTriggerMB: repo.currentUsage ?? 0
+                )
+                infoBanner = "Compaction started on BorgBase for “\(repo.name)”. It runs in the background — usage should drop over the next minutes."
             } catch {
                 self.error = error.localizedDescription
             }
+        }
+    }
+
+    /// Amber pill shown next to a repo while we believe BorgBase is still
+    /// compacting it. Uses a periodic TimelineView so the "Nm ago" text
+    /// updates without us managing a Timer.
+    @ViewBuilder
+    private func compactingPill(since: Date) -> some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            HStack(spacing: 4) {
+                Image(systemName: "hourglass")
+                    .font(.caption2)
+                Text("Compacting · \(relativeAgo(since, now: context.date))")
+                    .font(.caption.weight(.medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color.orange.opacity(0.18), in: Capsule())
+            .foregroundStyle(.orange)
+            .help("BorgBase is compacting this repo in the background. The pill disappears when usage drops or after 60 minutes.")
+        }
+    }
+
+    private func relativeAgo(_ date: Date, now: Date) -> String {
+        let fmt = RelativeDateTimeFormatter()
+        fmt.unitsStyle = .short
+        return fmt.localizedString(for: date, relativeTo: now)
+    }
+
+    /// Drops compaction entries that either (a) completed — detected by a
+    /// usage drop vs the value at trigger time — or (b) hit the 60-minute
+    /// safety timeout so a stuck request doesn't linger forever.
+    private func pruneCompactEntries(against fresh: [BorgBaseRepo]) {
+        guard !compactingSince.isEmpty else { return }
+        let now = Date()
+        let byId = Dictionary(uniqueKeysWithValues: fresh.map { ($0.id, $0) })
+        compactingSince = compactingSince.filter { id, entry in
+            if now.timeIntervalSince(entry.triggeredAt) > 3600 { return false }
+            if let repo = byId[id],
+               let newUsage = repo.currentUsage,
+               newUsage < entry.usageAtTriggerMB {
+                return false
+            }
+            return true
         }
     }
 
@@ -549,6 +656,7 @@ struct BorgBaseSheet: View {
             let (repos, keys) = try await (reposTask, keysTask)
             self.repos = repos.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             self.sshKeys = keys.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            pruneCompactEntries(against: repos)
         } catch {
             self.error = error.localizedDescription
         }

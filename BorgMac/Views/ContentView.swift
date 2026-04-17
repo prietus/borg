@@ -111,6 +111,10 @@ struct ContentView: View {
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
+                .disabled(!license.status.canCreateNew)
+                .help(license.status.canCreateNew
+                      ? "Add a repository"
+                      : "Trial expired — buy a license to add new repositories.")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {

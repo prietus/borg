@@ -81,9 +81,30 @@ struct LicensePane: View {
             }
 
             Spacer()
+
+            #if DEBUG
+            debugControls
+            #endif
         }
         .padding(22)
     }
+
+    #if DEBUG
+    private var debugControls: some View {
+        GroupBox("Debug (not shipped)") {
+            HStack(spacing: 10) {
+                Button("Force expired") {
+                    license.debugForceExpired()
+                }
+                Button("Reset trial (14d)") {
+                    license.debugResetTrial()
+                }
+                Spacer()
+            }
+            .padding(.vertical, 4)
+        }
+    }
+    #endif
 
     private var header: some View {
         HStack(spacing: 12) {
@@ -117,7 +138,7 @@ struct LicensePane: View {
             Label {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Trial expired").font(.body.weight(.semibold))
-                    Text("BorgMac still runs, but please consider buying a license to support development.")
+                    Text("Adding new repositories, schedules and servers is disabled. Existing ones keep running — buy a license to unlock creation.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }

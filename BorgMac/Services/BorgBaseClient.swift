@@ -32,12 +32,24 @@ struct BorgBaseRepo: Decodable, Identifiable, Hashable {
     let quotaEnabled: Bool?
     let encryption: String?
     let lastModified: String?
+    let createdAt: String?
     let alertDays: Int?
     let region: String?
+    let compactionEnabled: Bool?
+    let compactionInterval: Int?
+    let compactionIntervalUnit: String?
+    let compactionHour: Int?
+    let compactionHourTimezone: String?
+    let fullAccessKeys: [String]?
+    let appendOnlyKeys: [String]?
+    let rsyncKeys: [String]?
 
     enum CodingKeys: String, CodingKey {
         case id, name, repoPath, currentUsage, quota, quotaEnabled
-        case encryption, lastModified, alertDays, server
+        case encryption, lastModified, createdAt, alertDays, server
+        case compactionEnabled, compactionInterval, compactionIntervalUnit
+        case compactionHour, compactionHourTimezone
+        case fullAccessKeys, appendOnlyKeys, rsyncKeys
     }
 
     init(from decoder: Decoder) throws {
@@ -50,7 +62,16 @@ struct BorgBaseRepo: Decodable, Identifiable, Hashable {
         self.quotaEnabled = try? c.decode(Bool.self, forKey: .quotaEnabled)
         self.encryption = try? c.decode(String.self, forKey: .encryption)
         self.lastModified = try? c.decode(String.self, forKey: .lastModified)
+        self.createdAt = try? c.decode(String.self, forKey: .createdAt)
         self.alertDays = try? c.decode(Int.self, forKey: .alertDays)
+        self.compactionEnabled = try? c.decode(Bool.self, forKey: .compactionEnabled)
+        self.compactionInterval = try? c.decode(Int.self, forKey: .compactionInterval)
+        self.compactionIntervalUnit = try? c.decode(String.self, forKey: .compactionIntervalUnit)
+        self.compactionHour = try? c.decode(Int.self, forKey: .compactionHour)
+        self.compactionHourTimezone = try? c.decode(String.self, forKey: .compactionHourTimezone)
+        self.fullAccessKeys = try? c.decode([String].self, forKey: .fullAccessKeys)
+        self.appendOnlyKeys = try? c.decode([String].self, forKey: .appendOnlyKeys)
+        self.rsyncKeys = try? c.decode([String].self, forKey: .rsyncKeys)
 
         if let serverContainer = try? c.nestedContainer(
             keyedBy: ServerKeys.self, forKey: .server
@@ -165,7 +186,16 @@ actor BorgBaseClient {
             quotaEnabled
             encryption
             lastModified
+            createdAt
             alertDays
+            compactionEnabled
+            compactionInterval
+            compactionIntervalUnit
+            compactionHour
+            compactionHourTimezone
+            fullAccessKeys
+            appendOnlyKeys
+            rsyncKeys
             server { region }
           }
         }
@@ -249,13 +279,61 @@ actor BorgBaseClient {
         return try await send(query: query, variables: vars, decoding: Wrap.self).repoAdd.repoAdded
     }
 
-    /// Renames a repository. `repoEdit` accepts many optional fields; we
-    /// only send `id` and `name` so every other setting (quota, region,
-    /// keys…) is left untouched server-side.
+    /// Renames a repository. Kept as a convenience wrapper around
+    /// `updateRepo` — any caller that only wants to rename doesn't need to
+    /// build the full partial-update variables dict.
     func renameRepo(id: String, newName: String) async throws {
+        try await updateRepo(id: id, name: newName)
+    }
+
+    /// Partial update of a repo on BorgBase. Only the passed (non-nil) fields
+    /// are sent to the server, so every other setting is preserved. `quota`
+    /// is expected in megabytes, matching what `RepoType.quota` returns.
+    func updateRepo(
+        id: String,
+        name: String? = nil,
+        quota: Int? = nil,
+        quotaEnabled: Bool? = nil,
+        alertDays: Int? = nil,
+        compactionEnabled: Bool? = nil,
+        compactionInterval: Int? = nil,
+        compactionIntervalUnit: String? = nil,
+        compactionHour: Int? = nil,
+        compactionHourTimezone: String? = nil,
+        fullAccessKeys: [String]? = nil,
+        appendOnlyKeys: [String]? = nil,
+        rsyncKeys: [String]? = nil
+    ) async throws {
+        var argDecls: [String] = ["$id: String!"]
+        var argUses: [String] = ["id: $id"]
+        var vars: [String: Any] = ["id": id]
+
+        func addVar<V>(_ key: String, _ value: V?, gqlType: String) {
+            guard let value else { return }
+            argDecls.append("$\(key): \(gqlType)")
+            argUses.append("\(key): $\(key)")
+            vars[key] = value
+        }
+
+        addVar("name",                   name,                   gqlType: "String")
+        addVar("quota",                  quota,                  gqlType: "Int")
+        addVar("quotaEnabled",           quotaEnabled,           gqlType: "Boolean")
+        addVar("alertDays",              alertDays,              gqlType: "Int")
+        addVar("compactionEnabled",      compactionEnabled,      gqlType: "Boolean")
+        addVar("compactionInterval",     compactionInterval,     gqlType: "Int")
+        addVar("compactionIntervalUnit", compactionIntervalUnit, gqlType: "String")
+        addVar("compactionHour",         compactionHour,         gqlType: "Int")
+        addVar("compactionHourTimezone", compactionHourTimezone, gqlType: "String")
+        addVar("fullAccessKeys",         fullAccessKeys,         gqlType: "[String]")
+        addVar("appendOnlyKeys",         appendOnlyKeys,         gqlType: "[String]")
+        addVar("rsyncKeys",              rsyncKeys,              gqlType: "[String]")
+
+        // Nothing to change — save a round trip.
+        guard argDecls.count > 1 else { return }
+
         let query = """
-        mutation repoEdit($id: String!, $name: String!) {
-          repoEdit(id: $id, name: $name) {
+        mutation repoEdit(\(argDecls.joined(separator: ", "))) {
+          repoEdit(\(argUses.joined(separator: ", "))) {
             __typename
           }
         }
@@ -264,11 +342,27 @@ actor BorgBaseClient {
             struct Inner: Decodable {}
             let repoEdit: Inner
         }
-        _ = try await send(
-            query: query,
-            variables: ["id": id, "name": newName],
-            decoding: Wrap.self
-        )
+        _ = try await send(query: query, variables: vars, decoding: Wrap.self)
+    }
+
+    /// Triggers a server-side `borg compact` on the given repo. BorgBase runs
+    /// the operation asynchronously in its own infra — we don't get a job id
+    /// back, just a success envelope. Useful because compaction over SSH on a
+    /// large repo can saturate the user's uplink for hours, but here it's a
+    /// one-shot fire-and-forget.
+    func compactRepo(id: String) async throws {
+        let query = """
+        mutation repoCompact($id: String!) {
+          repoCompact(id: $id) {
+            __typename
+          }
+        }
+        """
+        struct Wrap: Decodable {
+            struct Inner: Decodable {}
+            let repoCompact: Inner
+        }
+        _ = try await send(query: query, variables: ["id": id], decoding: Wrap.self)
     }
 
     /// Deletes a repository permanently. BorgBase requires the account to be

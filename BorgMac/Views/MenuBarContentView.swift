@@ -5,6 +5,7 @@ struct MenuBarContentView: View {
     @EnvironmentObject var store: RepositoryStore
     @EnvironmentObject var statusStore: BackupRunStatusStore
     @EnvironmentObject var manualBackupStore: ManualBackupStore
+    @EnvironmentObject var license: LicenseManager
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -367,14 +368,20 @@ struct MenuBarContentView: View {
                 openWindow(id: "wizard")
                 NSApp.activate(ignoringOtherApps: true)
             }
+            .disabled(!license.status.canCreateNew)
+            .help(license.status.canCreateNew ? "" : expiredHelp)
             menuButton(label: "New on BorgBox…", systemImage: "server.rack") {
                 openWindow(id: "borgbox-wizard")
                 NSApp.activate(ignoringOtherApps: true)
             }
+            .disabled(!license.status.canCreateNew)
+            .help(license.status.canCreateNew ? "" : expiredHelp)
             menuButton(label: "New Borg repository (local or SSH)…", systemImage: "wand.and.stars.inverse") {
                 openWindow(id: "borg-wizard")
                 NSApp.activate(ignoringOtherApps: true)
             }
+            .disabled(!license.status.canCreateNew)
+            .help(license.status.canCreateNew ? "" : expiredHelp)
             menuButton(label: "Show BorgMac", systemImage: "macwindow") {
                 showMainWindow()
             }
@@ -383,6 +390,10 @@ struct MenuBarContentView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private var expiredHelp: String {
+        "Trial expired — buy a license to add new repositories."
     }
 
     private func menuButton(

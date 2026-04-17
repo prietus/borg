@@ -3,6 +3,7 @@ import SwiftUI
 struct BorgBoxServerPanel: View {
     @EnvironmentObject var serverStore: BorgBoxServerStore
     @EnvironmentObject var repoStore: RepositoryStore
+    @EnvironmentObject var license: LicenseManager
     @Environment(\.dismiss) private var dismiss
 
     @StateObject private var jobsStore = BorgBoxJobsStore()
@@ -36,6 +37,10 @@ struct BorgBoxServerPanel: View {
     /// Passphrases the user entered during this panel session, keyed by
     /// remote repo name. Only kept in-memory — wiped when the sheet closes.
     @State private var sessionPassphrases: [String: String] = [:]
+
+    /// Jobs whose log tail the user has expanded to see the full rolling
+    /// buffer. Collapsed by default.
+    @State private var expandedJobLogs: Set<String> = []
 
     private struct PruneTarget: Identifiable {
         let id = UUID()
@@ -349,6 +354,7 @@ struct BorgBoxServerPanel: View {
                     Divider()
                     if !isAlreadyImported(repo) {
                         Button("Import into BorgMac…") { importTarget = repo }
+                            .disabled(!license.status.canCreateNew)
                     }
                     Button("Break lock", role: .destructive) {
                         runBreakLock(repo: repo.name, server: server)
@@ -369,7 +375,10 @@ struct BorgBoxServerPanel: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("Generates a dedicated SSH key, registers it with the daemon, and adopts the repo in BorgMac.")
+                .disabled(!license.status.canCreateNew)
+                .help(license.status.canCreateNew
+                      ? "Generates a dedicated SSH key, registers it with the daemon, and adopts the repo in BorgMac."
+                      : "Trial expired — buy a license to register a new repository.")
             }
         }
         .padding(.vertical, 2)
@@ -427,14 +436,67 @@ struct BorgBoxServerPanel: View {
         let live = jobsStore.logs[job.id] ?? []
         let lines = !live.isEmpty ? live : (job.logTail ?? [])
         if !lines.isEmpty {
-            let recent = Array(lines.suffix(6))
-            Text(recent.joined(separator: "\n"))
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(6)
-                .truncationMode(.head)
-                .textSelection(.enabled)
+            let isExpanded = expandedJobLogs.contains(job.id)
+            let hasMore = lines.count > 6
+
+            VStack(alignment: .leading, spacing: 4) {
+                if isExpanded {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(lines.joined(separator: "\n"))
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                                .padding(6)
+                                .id("log-bottom-\(job.id)-\(lines.count)")
+                        }
+                        .frame(maxHeight: 220)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(Color.secondary.opacity(0.2))
+                        )
+                        .onAppear {
+                            proxy.scrollTo("log-bottom-\(job.id)-\(lines.count)", anchor: .bottom)
+                        }
+                        .onChange(of: lines.count) { _, _ in
+                            proxy.scrollTo("log-bottom-\(job.id)-\(lines.count)", anchor: .bottom)
+                        }
+                    }
+                } else {
+                    let recent = Array(lines.suffix(6))
+                    Text(recent.joined(separator: "\n"))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(6)
+                        .truncationMode(.head)
+                        .textSelection(.enabled)
+                }
+
+                if hasMore || isExpanded {
+                    Button {
+                        if isExpanded {
+                            expandedJobLogs.remove(job.id)
+                        } else {
+                            expandedJobLogs.insert(job.id)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.caption2)
+                            Text(isExpanded
+                                 ? "Collapse"
+                                 : "Show full log (\(lines.count) lines)")
+                                .font(.caption)
+                        }
+                        .foregroundStyle(.tint)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 
@@ -520,7 +582,10 @@ struct BorgBoxServerPanel: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(validatingServer || !canSaveNewServer)
+                .disabled(validatingServer || !canSaveNewServer || !license.status.canCreateNew)
+                .help(license.status.canCreateNew
+                      ? ""
+                      : "Trial expired — buy a license to add a new BorgBox server.")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
