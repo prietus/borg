@@ -61,6 +61,11 @@ struct BorgBoxRemoteRepo: Decodable, Identifiable, Hashable {
     /// the user can adopt it via POST /repos/import. Older daemons omit the
     /// field, in which case we treat it as registered for backwards compat.
     let registered: Bool?
+    /// Whether the repo's authorized_keys line forces `borg serve
+    /// --append-only`. Added in the 2026-04-18 daemon build; older daemons
+    /// omit the field, so it stays optional and the UI treats nil as
+    /// "unknown / assume off".
+    let appendOnly: Bool?
 
     var id: String { name }
 
@@ -73,6 +78,7 @@ struct BorgBoxRemoteRepo: Decodable, Identifiable, Hashable {
         case sizeBytes   = "size_bytes"
         case modifiedAt  = "modified_at"
         case sshUrl      = "ssh_url"
+        case appendOnly  = "append_only"
     }
 }
 
@@ -284,6 +290,86 @@ struct BorgBoxSchedule: Decodable, Identifiable, Hashable {
         let plain = ISO8601DateFormatter()
         plain.formatOptions = [.withInternetDateTime]
         return plain.date(from: s)
+    }
+}
+
+/// A "stale repo" alert registered with the BorgBox daemon. The daemon
+/// polls each repo's mtime on a tick and fires the alert's webhook when
+/// the gap exceeds `staleAfterHours`. `hasSecret` tells us whether
+/// outbound webhooks are HMAC-signed; the signing key itself is
+/// write-only and never travels back to the client.
+struct BorgBoxAlert: Decodable, Identifiable, Hashable {
+    let id: String
+    let repo: String
+    let staleAfterHours: Int
+    let webhookURL: String
+    let enabled: Bool
+    /// 0 means "never re-notify while the repo stays stale" — edge-triggered
+    /// fire only. Any positive value is the minimum gap (in hours) between
+    /// repeated `event: stale` deliveries while the stale state persists.
+    let renotifyHours: Int
+    /// Whether the daemon is currently configured to HMAC-sign this alert's
+    /// webhook deliveries. We never see the secret itself.
+    let hasSecret: Bool
+    let createdAt: String
+    let lastCheckAt: String
+    /// `nil` before the first check; after that `"ok"` or `"stale"`.
+    let lastState: String?
+    let lastWrite: String
+    let lastAlertedAt: String
+    let lastError: String
+
+    var lastCheckDate: Date?   { Self.parseRFC3339(lastCheckAt) }
+    var lastWriteDate: Date?   { Self.parseRFC3339(lastWrite) }
+    var lastAlertedDate: Date? { Self.parseRFC3339(lastAlertedAt) }
+
+    private static func parseRFC3339(_ s: String) -> Date? {
+        guard !s.isEmpty else { return nil }
+        let withFrac = ISO8601DateFormatter()
+        withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = withFrac.date(from: s) { return d }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: s)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, repo, enabled
+        case staleAfterHours = "stale_after_hours"
+        case webhookURL      = "webhook_url"
+        case renotifyHours   = "renotify_hours"
+        case hasSecret       = "has_secret"
+        case createdAt       = "created_at"
+        case lastCheckAt     = "last_check_at"
+        case lastState       = "last_state"
+        case lastWrite       = "last_write"
+        case lastAlertedAt   = "last_alerted_at"
+        case lastError       = "last_error"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id              = try c.decode(String.self, forKey: .id)
+        self.repo            = try c.decode(String.self, forKey: .repo)
+        self.staleAfterHours = try c.decode(Int.self,    forKey: .staleAfterHours)
+        self.webhookURL      = try c.decode(String.self, forKey: .webhookURL)
+        self.enabled         = try c.decode(Bool.self,   forKey: .enabled)
+        self.renotifyHours   = try c.decode(Int.self,    forKey: .renotifyHours)
+        // `has_secret` shipped in daemon 0.6 — older builds omit it. Treat
+        // a missing field as "no signing configured" so a mixed-version
+        // rollout doesn't spuriously claim every alert is signed.
+        self.hasSecret       = try c.decodeIfPresent(Bool.self, forKey: .hasSecret) ?? false
+        self.createdAt       = try c.decode(String.self, forKey: .createdAt)
+        self.lastCheckAt     = try c.decode(String.self, forKey: .lastCheckAt)
+        // Back-compat: daemon <0.6 returned `""` here, not `null`. Treat an
+        // empty string the same as a missing value so both wire formats
+        // collapse onto the same Swift nil and the UI doesn't have two
+        // "never checked" representations to special-case.
+        let rawState = try c.decodeIfPresent(String.self, forKey: .lastState)
+        self.lastState = (rawState?.isEmpty == true) ? nil : rawState
+        self.lastWrite       = try c.decode(String.self, forKey: .lastWrite)
+        self.lastAlertedAt   = try c.decode(String.self, forKey: .lastAlertedAt)
+        self.lastError       = try c.decode(String.self, forKey: .lastError)
     }
 }
 
@@ -808,6 +894,193 @@ actor BorgBoxClient {
         let token = try tokenOrThrow(server)
         let path = "schedules/\(encodeSegment(id))"
         try await deleteRequest(path, daemonURL: server.daemonURL, token: token)
+    }
+
+    // MARK: - Stale alerts (daemon, 2026-04-18)
+
+    /// Body for `POST /repos/{name}/alerts` and `PATCH /alerts/{id}`.
+    /// `encodeIfPresent` lets callers send partial patches — e.g. just
+    /// `{"enabled": false}` when toggling from the list row — without
+    /// stomping fields the user didn't touch.
+    private struct AlertBody: Encodable {
+        var staleAfterHours: Int?
+        var webhookURL: String?
+        var enabled: Bool?
+        var renotifyHours: Int?
+        // Secret semantics on the wire (PATCH): omitted = leave unchanged;
+        // `""` = clear; non-empty = set. `nil` here maps to omitted; pass
+        // "" explicitly to clear.
+        var secret: String?
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encodeIfPresent(staleAfterHours, forKey: .staleAfterHours)
+            try c.encodeIfPresent(webhookURL,      forKey: .webhookURL)
+            try c.encodeIfPresent(enabled,         forKey: .enabled)
+            try c.encodeIfPresent(renotifyHours,   forKey: .renotifyHours)
+            try c.encodeIfPresent(secret,          forKey: .secret)
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case enabled, secret
+            case staleAfterHours = "stale_after_hours"
+            case webhookURL      = "webhook_url"
+            case renotifyHours   = "renotify_hours"
+        }
+    }
+
+    private struct AlertTestResponse: Decodable { let status: String }
+
+    func listAlerts(server: BorgBoxServer) async throws -> [BorgBoxAlert] {
+        let token = try tokenOrThrow(server)
+        return try await get(
+            "alerts",
+            daemonURL: server.daemonURL,
+            token: token,
+            decoding: [BorgBoxAlert].self
+        )
+    }
+
+    func alertsForRepo(
+        server: BorgBoxServer,
+        repo: String
+    ) async throws -> [BorgBoxAlert] {
+        let token = try tokenOrThrow(server)
+        let path = "repos/\(encodeSegment(repo))/alerts"
+        return try await get(
+            path,
+            daemonURL: server.daemonURL,
+            token: token,
+            decoding: [BorgBoxAlert].self
+        )
+    }
+
+    func getAlert(server: BorgBoxServer, id: String) async throws -> BorgBoxAlert {
+        let token = try tokenOrThrow(server)
+        let path = "alerts/\(encodeSegment(id))"
+        return try await get(
+            path,
+            daemonURL: server.daemonURL,
+            token: token,
+            decoding: BorgBoxAlert.self
+        )
+    }
+
+    func createAlert(
+        server: BorgBoxServer,
+        repo: String,
+        staleAfterHours: Int,
+        webhookURL: String,
+        enabled: Bool,
+        renotifyHours: Int,
+        secret: String? = nil
+    ) async throws -> BorgBoxAlert {
+        let token = try tokenOrThrow(server)
+        let path = "repos/\(encodeSegment(repo))/alerts"
+        // An empty string from the caller means "no signing" — same as nil,
+        // just don't send the field so the daemon doesn't treat "" as a
+        // deliberate clear operation.
+        let normalizedSecret = (secret?.isEmpty == true) ? nil : secret
+        let body = AlertBody(
+            staleAfterHours: staleAfterHours,
+            webhookURL: webhookURL,
+            enabled: enabled,
+            renotifyHours: renotifyHours,
+            secret: normalizedSecret
+        )
+        return try await post(
+            path,
+            daemonURL: server.daemonURL,
+            token: token,
+            body: body,
+            decoding: BorgBoxAlert.self
+        )
+    }
+
+    /// Partial update. Any argument left nil is omitted from the body,
+    /// so the daemon keeps the current value. This is the same
+    /// "send-what-changed" pattern used by `updateSchedule`.
+    ///
+    /// `secret` has three states on the wire: nil (omit → leave unchanged),
+    /// `""` (clear the secret → stop signing), or a non-empty string (set
+    /// or rotate). Callers can pass `""` to disable signing on an alert
+    /// that previously had a secret.
+    func updateAlert(
+        server: BorgBoxServer,
+        id: String,
+        staleAfterHours: Int? = nil,
+        webhookURL: String? = nil,
+        enabled: Bool? = nil,
+        renotifyHours: Int? = nil,
+        secret: String? = nil
+    ) async throws -> BorgBoxAlert {
+        let token = try tokenOrThrow(server)
+        let path = "alerts/\(encodeSegment(id))"
+        let body = AlertBody(
+            staleAfterHours: staleAfterHours,
+            webhookURL: webhookURL,
+            enabled: enabled,
+            renotifyHours: renotifyHours,
+            secret: secret
+        )
+        return try await patch(
+            path,
+            daemonURL: server.daemonURL,
+            token: token,
+            body: body,
+            decoding: BorgBoxAlert.self
+        )
+    }
+
+    func deleteAlert(server: BorgBoxServer, id: String) async throws {
+        let token = try tokenOrThrow(server)
+        let path = "alerts/\(encodeSegment(id))"
+        try await deleteRequest(path, daemonURL: server.daemonURL, token: token)
+    }
+
+    /// Synchronously fires one `event: "test"` delivery against the
+    /// configured webhook. Returns on 2xx (`{"status":"ok"}`); throws
+    /// `BorgBoxError.apiError(...)` with the daemon's reason string when
+    /// the webhook rejects (e.g. `"webhook returned 404"`), so the UI
+    /// can show ✅/❌ with a meaningful message.
+    func testAlert(server: BorgBoxServer, id: String) async throws {
+        let token = try tokenOrThrow(server)
+        let path = "alerts/\(encodeSegment(id))/test"
+        _ = try await postNoBody(
+            path,
+            daemonURL: server.daemonURL,
+            token: token,
+            decoding: AlertTestResponse.self
+        )
+    }
+
+    // MARK: - Repo append-only toggle (daemon, 2026-04-18)
+
+    private struct RepoUpdateBody: Encodable {
+        let appendOnly: Bool?
+        enum CodingKeys: String, CodingKey {
+            case appendOnly = "append_only"
+        }
+    }
+
+    /// PATCHes an existing repo's metadata. Currently only exposes the
+    /// `append_only` flag; the daemon stays responsible for rewriting the
+    /// authorized_keys line, so the client just forwards the boolean.
+    func updateRepo(
+        server: BorgBoxServer,
+        repo: String,
+        appendOnly: Bool
+    ) async throws -> BorgBoxRemoteRepo {
+        let token = try tokenOrThrow(server)
+        let path = "repos/\(encodeSegment(repo))"
+        let body = RepoUpdateBody(appendOnly: appendOnly)
+        return try await patch(
+            path,
+            daemonURL: server.daemonURL,
+            token: token,
+            body: body,
+            decoding: BorgBoxRemoteRepo.self
+        )
     }
 
     // MARK: - Token helpers

@@ -17,10 +17,12 @@ struct BorgBoxServerPanel: View {
     /// Sub-sheet state — only one of these can be presented at a time.
     @State private var pruneTarget: PruneTarget?
     @State private var archivesTarget: ArchivesTarget?
+    @State private var alertsTarget: AlertsTarget?
     @State private var importTarget: BorgBoxRemoteRepo?
     @State private var registerTarget: BorgBoxRemoteRepo?
     @State private var passphrasePrompt: PassphrasePrompt?
     @State private var pendingDeleteRepo: String?
+    @State private var pendingAppendOnlyDisable: String?
     @State private var pendingChangeServer: Bool = false
 
     // Inline "add server" form state — used when no server is configured
@@ -52,6 +54,11 @@ struct BorgBoxServerPanel: View {
         let id = UUID()
         let repo: String
         let passphrase: String?
+    }
+
+    private struct AlertsTarget: Identifiable {
+        let id = UUID()
+        let repo: String
     }
 
     private struct PassphrasePrompt: Identifiable {
@@ -116,6 +123,12 @@ struct BorgBoxServerPanel: View {
                 passphrase: target.passphrase
             )
         }
+        .sheet(item: $alertsTarget) { target in
+            BorgBoxAlertsSheet(
+                server: server,
+                repo: target.repo
+            )
+        }
         .sheet(item: $importTarget) { remote in
             BorgBoxImportSheet(
                 server: server,
@@ -175,6 +188,24 @@ struct BorgBoxServerPanel: View {
             Button("Cancel", role: .cancel) { pendingDeleteRepo = nil }
         } message: {
             Text("This deletes the repo from the BorgBox daemon. The on-disk data is lost and cannot be recovered.")
+        }
+        .confirmationDialog(
+            "Disable append-only on \(pendingAppendOnlyDisable ?? "")?",
+            isPresented: Binding(
+                get: { pendingAppendOnlyDisable != nil },
+                set: { if !$0 { pendingAppendOnlyDisable = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Disable append-only", role: .destructive) {
+                if let name = pendingAppendOnlyDisable {
+                    runSetAppendOnly(repo: name, appendOnly: false, server: server)
+                }
+                pendingAppendOnlyDisable = nil
+            }
+            Button("Cancel", role: .cancel) { pendingAppendOnlyDisable = nil }
+        } message: {
+            Text("Clients will regain the ability to prune and delete archives in this repo. Only turn this off if you trust the key that's writing to it.")
         }
         .confirmationDialog(
             "Forget this BorgBox server?",
@@ -336,6 +367,19 @@ struct BorgBoxServerPanel: View {
                             .background(Color.orange.opacity(0.18), in: Capsule())
                             .foregroundStyle(.orange)
                     }
+                    if repo.appendOnly == true {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.fill")
+                                .font(.caption2)
+                            Text("Append-only")
+                                .font(.caption.weight(.medium))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor.opacity(0.18), in: Capsule())
+                        .foregroundStyle(.tint)
+                        .help("The daemon enforces append-only on this repo: clients can add archives but cannot prune or delete without server-side intervention.")
+                    }
                 }
                 if let size = repo.sizeBytes {
                     Text(formatBytes(size))
@@ -347,6 +391,7 @@ struct BorgBoxServerPanel: View {
             if repo.isRegistered {
                 Menu {
                     Button("Archives…") { startArchives(repo: repo.name, server: server) }
+                    Button("Alerts…") { alertsTarget = AlertsTarget(repo: repo.name) }
                     Divider()
                     Button("Check") { startCheck(repo: repo.name, server: server) }
                     Button("Prune…") { startPrune(repo: repo.name, server: server) }
@@ -355,6 +400,16 @@ struct BorgBoxServerPanel: View {
                     if !isAlreadyImported(repo) {
                         Button("Import into BorgMac…") { importTarget = repo }
                             .disabled(!license.status.canCreateNew)
+                    }
+                    Divider()
+                    if repo.appendOnly == true {
+                        Button("Disable append-only…", role: .destructive) {
+                            pendingAppendOnlyDisable = repo.name
+                        }
+                    } else {
+                        Button("Enable append-only") {
+                            runSetAppendOnly(repo: repo.name, appendOnly: true, server: server)
+                        }
                     }
                     Button("Break lock", role: .destructive) {
                         runBreakLock(repo: repo.name, server: server)
@@ -840,6 +895,25 @@ struct BorgBoxServerPanel: View {
                 jobsStore.register(initial: start, kind: "compact", repo: repo, server: server)
             } catch BorgBoxError.http(404, _) {
                 self.error = "The daemon doesn't implement /repos/\(repo)/compact yet."
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    private func runSetAppendOnly(repo: String, appendOnly: Bool, server: BorgBoxServer) {
+        Task {
+            do {
+                let updated = try await BorgBoxClient.shared.updateRepo(
+                    server: server,
+                    repo: repo,
+                    appendOnly: appendOnly
+                )
+                if let idx = repos.firstIndex(where: { $0.name == repo }) {
+                    repos[idx] = updated
+                }
+            } catch BorgBoxError.http(409, _) {
+                self.error = "The daemon doesn't have a registered key for \(repo), so it won't toggle append-only on it."
             } catch {
                 self.error = error.localizedDescription
             }
