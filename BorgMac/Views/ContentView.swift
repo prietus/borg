@@ -4,7 +4,6 @@ struct ContentView: View {
     @EnvironmentObject var store: RepositoryStore
     @EnvironmentObject var borgBoxStore: BorgBoxServerStore
     @EnvironmentObject var statusStore: BackupRunStatusStore
-    @EnvironmentObject var license: LicenseManager
     @Environment(\.openWindow) private var openWindow
     @State private var selection: Repository.ID?
     @State private var addIntent: AddRepoIntent?
@@ -14,22 +13,19 @@ struct ContentView: View {
     @State private var showingAutomation = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            TrialBannerView()
-            NavigationSplitView {
-                sidebar
-            } detail: {
-                if let id = selection,
-                   let repo = store.repositories.first(where: { $0.id == id }) {
-                    RepositoryDetailView(repository: repo)
-                        .id(repo.id)
-                } else {
-                    ContentUnavailableView(
-                        "Select a repository",
-                        systemImage: "externaldrive",
-                        description: Text("Add or pick a repository in the sidebar.")
-                    )
-                }
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            if let id = selection,
+               let repo = store.repositories.first(where: { $0.id == id }) {
+                RepositoryDetailView(repository: repo)
+                    .id(repo.id)
+            } else {
+                ContentUnavailableView(
+                    "Select a repository",
+                    systemImage: "externaldrive",
+                    description: Text("Add or pick a repository in the sidebar.")
+                )
             }
         }
         .sheet(item: $addIntent) { intent in
@@ -111,10 +107,7 @@ struct ContentView: View {
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
-                .disabled(!license.status.canCreateNew)
-                .help(license.status.canCreateNew
-                      ? "Add a repository"
-                      : "Trial expired — buy a license to add new repositories.")
+                .help("Add a repository")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {

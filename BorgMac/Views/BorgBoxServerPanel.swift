@@ -3,7 +3,6 @@ import SwiftUI
 struct BorgBoxServerPanel: View {
     @EnvironmentObject var serverStore: BorgBoxServerStore
     @EnvironmentObject var repoStore: RepositoryStore
-    @EnvironmentObject var license: LicenseManager
     @Environment(\.dismiss) private var dismiss
 
     @StateObject private var jobsStore = BorgBoxJobsStore()
@@ -399,7 +398,6 @@ struct BorgBoxServerPanel: View {
                     Divider()
                     if !isAlreadyImported(repo) {
                         Button("Import into BorgMac…") { importTarget = repo }
-                            .disabled(!license.status.canCreateNew)
                     }
                     Divider()
                     if repo.appendOnly == true {
@@ -430,10 +428,7 @@ struct BorgBoxServerPanel: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(!license.status.canCreateNew)
-                .help(license.status.canCreateNew
-                      ? "Generates a dedicated SSH key, registers it with the daemon, and adopts the repo in BorgMac."
-                      : "Trial expired — buy a license to register a new repository.")
+                .help("Generates a dedicated SSH key, registers it with the daemon, and adopts the repo in BorgMac.")
             }
         }
         .padding(.vertical, 2)
@@ -637,10 +632,7 @@ struct BorgBoxServerPanel: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .disabled(validatingServer || !canSaveNewServer || !license.status.canCreateNew)
-                .help(license.status.canCreateNew
-                      ? ""
-                      : "Trial expired — buy a license to add a new BorgBox server.")
+                .disabled(validatingServer || !canSaveNewServer)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)

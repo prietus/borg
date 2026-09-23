@@ -3,7 +3,6 @@ import SwiftUI
 struct BorgBaseSheet: View {
     var onImport: (_ name: String, _ url: String) -> Void
 
-    @EnvironmentObject var license: LicenseManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var tokenInput: String = ""
@@ -383,7 +382,7 @@ struct BorgBaseSheet: View {
                 Label("Import", systemImage: "square.and.arrow.down")
             }
             .buttonStyle(.bordered)
-            .disabled(repo.repoPath?.isEmpty ?? true || repoAlreadyImported(repo) || !license.status.canCreateNew)
+            .disabled(repo.repoPath?.isEmpty ?? true || repoAlreadyImported(repo))
             .help(importHelp(for: repo))
             if let entry = compactingSince[repo.id] {
                 compactingPill(since: entry.triggeredAt)
@@ -532,9 +531,6 @@ struct BorgBaseSheet: View {
     private func importHelp(for repo: BorgBaseRepo) -> String {
         if repoAlreadyImported(repo) {
             return "This repository is already added locally."
-        }
-        if !license.status.canCreateNew {
-            return "Trial expired — buy a license to import new repositories."
         }
         return "Prefill a new local repository with this URL."
     }

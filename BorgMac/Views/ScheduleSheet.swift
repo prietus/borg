@@ -6,7 +6,6 @@ import AppKit
 struct ScheduleSheet: View {
     @EnvironmentObject var store: RepositoryStore
     @EnvironmentObject var statusStore: BackupRunStatusStore
-    @EnvironmentObject var license: LicenseManager
     @Environment(\.dismiss) private var dismiss
 
     let repository: Repository
@@ -85,10 +84,7 @@ struct ScheduleSheet: View {
             } label: {
                 Label("Add", systemImage: "plus")
             }
-            .disabled(!license.status.canCreateNew)
-            .help(license.status.canCreateNew
-                  ? "Add a new schedule"
-                  : "Trial expired — buy a license to add new schedules.")
+            .help("Add a new schedule")
         }
     }
 
