@@ -39,3 +39,6 @@ Carthage/Build/
 # Release artifacts
 *.zip
 *.dmg
+
+# Release artifacts written by release.sh
+dist/
