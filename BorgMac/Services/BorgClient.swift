@@ -247,7 +247,12 @@ actor BorgClient {
     static func sanitizeStderr(_ raw: String) -> String {
         let trimmedWhole = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmedWhole.isEmpty { return "" }
-        var messages: [String] = []
+        // Bucket by severity. `--log-json` lines carry a `levelname`;
+        // anything that is not JSON (ssh noise, banners) is "plain".
+        var errors: [String] = []
+        var warnings: [String] = []
+        var plain: [String] = []
+        var inOrder: [String] = []
         var sawJSON = false
         for rawLine in raw.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -258,22 +263,34 @@ actor BorgClient {
                 sawJSON = true
                 let type = obj["type"] as? String
                 if type == "archive_progress" { continue }
-                if let msg = (obj["message"] as? String)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                   !msg.isEmpty {
-                    messages.append(msg)
+                guard let msg = (obj["message"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !msg.isEmpty else { continue }
+                inOrder.append(msg)
+                switch (obj["levelname"] as? String)?.uppercased() {
+                case "ERROR", "CRITICAL": errors.append(msg)
+                case "WARNING": warnings.append(msg)
+                default: break
                 }
                 continue
             }
-            messages.append(line)
+            inOrder.append(line)
+            plain.append(line)
         }
         if !sawJSON { return trimmedWhole }
-        if messages.isEmpty { return trimmedWhole }
+        if inOrder.isEmpty { return trimmedWhole }
+        // When borg logged anything at WARNING or above, that is the
+        // cause of the failure and the INFO chatter around it ("Initializing
+        // cache transaction…", "Remote:" banners) only buries it. Put the
+        // most severe lines first so a one-line summary shows the reason,
+        // and drop INFO entirely in that case. With no warnings at all,
+        // keep everything in the order borg printed it.
+        let ordered = (errors.isEmpty && warnings.isEmpty) ? inOrder : errors + warnings + plain
         // De-duplicate consecutive identical lines (borg repeats the same
         // "Remote:" banner several times over a session) to keep the UI
         // surface tight.
         var deduped: [String] = []
-        for m in messages where deduped.last != m {
+        for m in ordered where deduped.last != m {
             deduped.append(m)
         }
         return deduped.joined(separator: "\n")
@@ -317,7 +334,14 @@ actor BorgClient {
         if keepMonthly > 0 { args += ["--keep-monthly", String(keepMonthly)] }
         args.append(repo.url)
         _ = try await run(args, passphrase: passphrase, sshKeyPath: repo.sshKeyPath)
-        _ = try? await run(["compact", repo.url], passphrase: passphrase, sshKeyPath: repo.sshKeyPath)
+        // Compact is what actually returns space to the server. A failure
+        // here must not fail the prune, but it should not vanish either —
+        // the headless runner's log is the only place to see it.
+        do {
+            _ = try await run(["compact", repo.url], passphrase: passphrase, sshKeyPath: repo.sshKeyPath)
+        } catch {
+            fputs("compact failed: \(error.localizedDescription)\n", stderr)
+        }
     }
 
     func extract(repo: Repository, archive: String, into destination: URL) async throws {

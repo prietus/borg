@@ -32,6 +32,10 @@ struct BackupSchedule: Codable, Hashable, Identifiable {
     var keepWeekly: Int = 0
     var keepMonthly: Int = 0
 
+    /// True when any `--keep-*` value is set, i.e. the scheduled run
+    /// should prune (and compact) the repository after backing up.
+    var hasRetention: Bool { keepDaily > 0 || keepWeekly > 0 || keepMonthly > 0 }
+
     /// Decoder that tolerates missing fields — keeps legacy schedules (saved
     /// before multi-job support landed) readable. Any missing `id` gets a
     /// fresh UUID so the migration path can install a correctly-labeled plist.

@@ -186,14 +186,18 @@ enum ScheduledBackupRunner {
         // chunks already uploaded by the previous attempt are reused.
         var lastError = "unknown error"
         var archive = archiveName(scheduleName: schedule.name)
+        var attemptsAllowed = maxAttempts
+        var prunedForQuota = false
+        var attempt = 0
 
-        for attempt in 1...maxAttempts {
+        while attempt < attemptsAllowed {
+            attempt += 1
             if isCancelled() {
                 fputs("[\(Date())] cancelled — aborting retry loop\n", stderr)
                 return false
             }
-            markAttempt(scheduleId: scheduleId, attempt: attempt, max: maxAttempts)
-            fputs("[\(Date())] attempt \(attempt)/\(maxAttempts) — borg create ::\(archive)\n", stdout)
+            markAttempt(scheduleId: scheduleId, attempt: attempt, max: attemptsAllowed)
+            fputs("[\(Date())] attempt \(attempt)/\(attemptsAllowed) — borg create ::\(archive)\n", stdout)
 
             let (success, errText) = runAttempt(
                 repo: repo,
@@ -231,8 +235,34 @@ enum ScheduledBackupRunner {
             lastError = errText ?? "unknown error"
             fputs("[\(Date())] attempt \(attempt) failed: \(lastError)\n", stderr)
 
-            if attempt < maxAttempts {
-                let delay = retryDelaysSec[attempt - 1]
+            // A full storage quota on the server is not transient: retrying
+            // the same create only re-syncs the cache for minutes and fails
+            // identically. If the schedule has retention, do what the
+            // post-backup step would have done — prune + compact, which is
+            // what frees space server-side — and give create one more go.
+            // Without retention, or if it is still over quota afterwards,
+            // stop right away and say what to do.
+            if let errText, isStorageQuotaExceeded(errText) {
+                if schedule.hasRetention && !prunedForQuota {
+                    prunedForQuota = true
+                    fputs("[\(Date())] storage quota exceeded — running prune + compact before retrying\n", stdout)
+                    if let pruneError = runPrune(repo: repo, schedule: schedule, passphrase: passphrase) {
+                        fputs("[\(Date())] prune failed: \(pruneError)\n", stderr)
+                        lastError += "\nPrune before retry failed: \(pruneError)"
+                        break
+                    }
+                    attemptsAllowed = max(attemptsAllowed, attempt + 1)
+                    archive = archiveName(scheduleName: schedule.name)
+                    continue
+                }
+                lastError += schedule.hasRetention
+                    ? "\nBorgMac pruned and compacted the repository and retried once, but it is still over quota. Raise the quota or keep fewer archives."
+                    : "\nBorgMac did not retry. Add a retention to this schedule so it can prune, or prune the repository by hand."
+                break
+            }
+
+            if attempt < attemptsAllowed {
+                let delay = retryDelaysSec[min(attempt - 1, retryDelaysSec.count - 1)]
                 fputs("[\(Date())] retrying in \(delay)s\n", stdout)
                 Thread.sleep(forTimeInterval: TimeInterval(delay))
                 archive = archiveName(scheduleName: schedule.name)
@@ -309,7 +339,7 @@ enum ScheduledBackupRunner {
                     onProgress: onProgress,
                     onLaunch: onLaunch
                 )
-                if schedule.keepDaily > 0 || schedule.keepWeekly > 0 || schedule.keepMonthly > 0 {
+                if schedule.hasRetention {
                     do {
                         try await BorgClient.shared.pruneUnattended(
                             repo: repo,
@@ -335,6 +365,41 @@ enum ScheduledBackupRunner {
         currentBorgPid = 0
         cancelLock.unlock()
         return (success, errorText)
+    }
+
+    /// Borg's `Repository.StorageQuotaExceeded`, as logged by `borg serve
+    /// --storage-quota` (BorgBase, BorgBox): "The storage quota (X) has
+    /// been exceeded (Y). Try deleting some archives."
+    private static func isStorageQuotaExceeded(_ error: String) -> Bool {
+        let lower = error.lowercased()
+        return lower.contains("storage quota") || lower.contains("storagequotaexceeded")
+    }
+
+    /// Runs prune + compact synchronously with the schedule's retention.
+    /// Returns nil on success, or the error text.
+    private static func runPrune(
+        repo: Repository,
+        schedule: BackupSchedule,
+        passphrase: String
+    ) -> String? {
+        let sem = DispatchSemaphore(value: 0)
+        var errorText: String?
+        Task.detached {
+            do {
+                try await BorgClient.shared.pruneUnattended(
+                    repo: repo,
+                    passphrase: passphrase,
+                    keepDaily: schedule.keepDaily,
+                    keepWeekly: schedule.keepWeekly,
+                    keepMonthly: schedule.keepMonthly
+                )
+            } catch {
+                errorText = error.localizedDescription
+            }
+            sem.signal()
+        }
+        sem.wait()
+        return errorText
     }
 
     // MARK: - Repository loading (duplicates the minimal path that the GUI
